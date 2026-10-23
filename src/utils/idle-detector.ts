@@ -159,9 +159,10 @@ export class IdleDetector {
    * The caller must first confirm the PTY is quiet AND the current rendered
    * screen matches readyPattern. This only restores readySeen — a full
    * quiescence check (spinner guard included) still runs on top of it, so no
-   * existing check is bypassed.
+   * existing check is bypassed. A newly initialized restored composer can opt
+   * into rechecking evidence whose timer already expired behind startup loading.
    */
-  seedReadyEvidence(): boolean {
+  seedReadyEvidence(recheckExisting = false): boolean {
     if (this.programStatusAuthority) {
       // The post-SessionStart fallback only calls this once the viewport
       // already shows a prompt. Re-publish the OSC terminal state; do not
@@ -175,7 +176,7 @@ export class IdleDetector {
       this.markIdle('program-status');
       return true;
     }
-    if (this.isIdle || this.readySeen) return false;
+    if (this.isIdle || (this.readySeen && !recheckExisting)) return false;
     this.readySeen = true;
     this.clearTimer();
     this.quiescenceCheck();
@@ -505,6 +506,25 @@ export class IdleDetector {
     // its loaded banner was omitted or the operator customized the footer.
     this.markStartupComplete();
     this.markIdle('external');
+  }
+
+  /** The worker published prompt-ready on evidence of its own (the
+   *  first-prompt-timeout screen probe, a ready-gate settle, …) without this
+   *  detector having reported idle. Take that as this cycle's idle edge, minus
+   *  the callback the worker has just acted on, so the next explicit busy
+   *  marker is reported. Otherwise the edge stays disarmed until the detector
+   *  publishes an idle of its own — after the next turn — and that whole turn
+   *  reads as idle. No-op once this cycle already has its idle edge. */
+  adoptPromptReady(): void {
+    if (this.isIdle || this.busyTransitionArmed) return;
+    // An OSC 7501 working/blocked turn outranks a worker-side ready, as in
+    // fireIdle(): adopting it would mask the stale-working release and the
+    // busy edge that report must still produce.
+    if (this.programStatusAuthority && this.hasBusyProgramStatus()) return;
+    // The next feed() starts a fresh cycle from here (and drops the stale tail).
+    this.isIdle = true;
+    this.firstIdlePublished = true;
+    this.busyTransitionArmed = true;
   }
 
   /** Read-only view of the current cycle's idle edge (no side effects). */

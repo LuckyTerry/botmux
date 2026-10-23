@@ -1,3 +1,4 @@
+import { normalizeVcMeetingListenerPolicy, type VcMeetingListenerPolicy } from './services/vc-meeting-listener-policy.js';
 import { normalizeReplyFooter, parseReplyFooterEnv, type ReplyFooterPreferences } from './services/reply-footer.js';
 import { parseGroupCreationDefaults, type GroupCreationDefaults } from './services/group-creation-options.js';
 import { readGlobalConfig } from './global-config.js';
@@ -24,6 +25,7 @@ import {
 import type { CliId } from './adapters/cli/types.js';
 import {
   normalizeCliRuntimeConfig,
+  supportsConfiguredCliRuntime,
   type CliRuntimeConfig,
 } from './adapters/cli/runtime.js';
 import {
@@ -85,7 +87,7 @@ import {
   setAskOptionLayoutLookup,
   type AskOptionLayout,
 } from './im/lark/ask-option-layout.js';
-import { cliModelSupportsReasoningEffort, isBackendVariantCliId, isConfigurableReasoningCliId, isCodexReasoningEffort } from './services/codex-reasoning-effort.js';
+import { knownTraexReasoningEffortsForModel, cliModelSupportsReasoningEffort, isBackendVariantCliId, isConfigurableReasoningCliId, isCodexReasoningEffort } from './services/codex-reasoning-effort.js';
 import { isCodexServiceTier, isCodexServiceTierCliId, type CodexServiceTier } from './services/codex-service-tier.js';
 import {
   normalizeNativeSubagentRuntimePolicy,
@@ -104,6 +106,11 @@ import {
   normalizeQuotaFallbackBotConfig,
   type QuotaFallbackBotConfig,
 } from './services/quota-fallback.js';
+import {
+  normalizeTraexAutoModelConfig,
+  TRAEX_AUTO_MODEL_ID,
+  type TraexAutoModelConfig,
+} from './services/traex-auto-model.js';
 import { normalizeCardActionAckTimeoutMs } from './core/card-action-ack.js';
 import { cliSupportsConfigDir, normalizeCliConfigDir } from './core/cli-config-dir.js';
 import type {
@@ -151,7 +158,7 @@ export const LARK_REQUEST_TIMEOUT_MS = 15_000;
 export const LARK_UPLOAD_TIMEOUT_MS = 120_000;
 
 /**
- * Upper bound for a per-bot dsh runner turn timeout. Node's `setTimeout` delay
+ * Upper bound for a per-bot runner turn timeout. Node's `setTimeout` delay
  * is a 32-bit signed int of milliseconds; a larger value silently wraps to ~1ms
  * and emits `TimeoutOverflowWarning`, so any timeout the runner will actually
  * arm must fit here. Config parsing, the dashboard IPC, and the dashboard UI all
@@ -469,9 +476,16 @@ function normalizeVcMeetingAgentConfig(raw: unknown): VcMeetingAgentConfig | und
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const entry = raw as Record<string, unknown>;
   const out: VcMeetingAgentConfig = {};
+  const listenerPolicy = normalizeVcMeetingListenerPolicy(entry.listenerPolicy);
+  if (listenerPolicy) out.listenerPolicy = listenerPolicy;
   // VC 默认对每个连着飞书的 bot 生效(vcMeetingAgentConfigActive:enabled!==false),
   // 所以 enabled:false 是**显式退出**,必须原样保留——只留 true 会把 false round-trip
   // 成 undefined(=默认开),让"关掉这个 bot 的会议"重载即失效。
+  if (entry.inviterManagementEnabled === true) out.inviterManagementEnabled = true;
+  else if (entry.inviterManagementEnabled === false) out.inviterManagementEnabled = false;
+  if (Number.isSafeInteger(entry.inviterManagementEnabledAt) && Number(entry.inviterManagementEnabledAt) >= 0) {
+    out.inviterManagementEnabledAt = Number(entry.inviterManagementEnabledAt);
+  }
   if (entry.enabled === true) out.enabled = true;
   else if (entry.enabled === false) out.enabled = false;
   const notificationChatId = normalizeNonEmptyString(entry.notificationChatId);
@@ -1318,6 +1332,10 @@ export interface SubstituteModeConfig {
 }
 
 export interface VcMeetingAgentConfig {
+  listenerPolicy?: Partial<VcMeetingListenerPolicy>;
+  /** Owner opt-in: verified inviters may manage only the invited meeting. Default false. */
+  inviterManagementEnabled?: boolean;
+  inviterManagementEnabledAt?: number;
   enabled?: boolean;
   /** Existing chat used for meeting transcript/chat sync. If unset, confirmation creates a listener group. */
   listenerChatId?: string;
@@ -1549,6 +1567,10 @@ export interface BotConfig {
    * `modelChoices` for the curated candidates surfaced in `botmux setup`.
    */
   model?: string;
+  /** Experimental TraeX-only ordered model allowlist used when model=`auto`.
+   * The first entry is the core model; later entries are capacity fallbacks.
+   * Missing keeps the feature off. */
+  traexAutoModel?: TraexAutoModelConfig;
   /** Per-chat defaults captured only by newly created topics. */
   groupDefaultModels?: Record<string, GroupDefaultModels>;
   /** Explicit per-group FIFO for authenticated managed-session IM inputs. Default off; independent of Oncall. */
@@ -1558,11 +1580,13 @@ export interface BotConfig {
   /** Optional TraeX backend variant. Missing inherits TraeX global config. */
   modelBackendVariant?: 'standard' | 'max';
   /**
-   * Per-bot dsh runner turn timeout in milliseconds. The dsh adapter forwards
+   * Per-bot dsh / MiniMax runner timeout in milliseconds. The dsh adapter forwards
    * it as `--turn-timeout-ms` to arm the runner's idle watchdog (with a hard
    * cap of 4x this value). Positive integer only; unset/≤0/non-integer means
    * no watchdog is armed (the default — a turn runs until dsh reports idle).
-   * Only affects the `dsh` CLI adapter; other adapters ignore the field.
+   * MiniMax uses an opt-in total execution budget (human waits pause it).
+   * Both runners leave turn duration unlimited when this field is absent.
+   * Other adapters ignore the field.
    */
   turnTimeoutMs?: number;
   /**
@@ -1674,10 +1698,9 @@ export interface BotConfig {
   /** Omit only email from prompt sender tags; keep daemon identity intact. Default false. */
   senderTagHideEmail?: boolean;
   /**
-   * Codex only (opt-in, experimental): deliver user input via the app-server
-   * JSON-RPC channel instead of a tmux paste. The pane runs `codex --remote`
-   * attached to a botmux-owned app-server thread, so input can't be dropped by
-   * codex's terminal re-init. No effect on non-codex bots.
+   * Codex / TraeX (experimental): override the machine default for app-server
+   * JSON-RPC input. True enables, false keeps terminal input, absence inherits
+   * dashboard.codexRpcInput. No effect on other CLIs.
    */
   codexRpcInput?: boolean;
   /**
@@ -3547,8 +3570,8 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     // BotMux still launches the same distribution. Any unequal pair would make
     // old and new versions disagree, so it fails closed below.
     const entryCliId = entry.cliId ?? LEGACY_DEFAULT_CLI_ID;
-    if (entry.cliRuntime !== undefined && entryCliId !== 'codex') {
-      throw new Error(`Bot config [${i}]: cliRuntime is currently supported only for cliId "codex"`);
+    if (entry.cliRuntime !== undefined && !supportsConfiguredCliRuntime(entryCliId)) {
+      throw new Error(`Bot config [${i}]: cliRuntime is currently supported only for cliId "codex" or "kimi"`);
     }
     if (entry.cliRuntime !== undefined && typeof entry.wrapperCli === 'string' && entry.wrapperCli.trim()) {
       throw new Error(`Bot config [${i}]: cliRuntime cannot be combined with wrapperCli`);
@@ -3883,6 +3906,31 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         `[bot-registry:${entry.larkAppId}] nativeSubagentRuntime ignored: ${normalizedNativeSubagentRuntime.error}`,
       );
     }
+    const requestedModel = typeof entry.model === 'string' && entry.model.trim()
+      ? entry.model.trim()
+      : undefined;
+    const normalizedTraexAutoModel = normalizeTraexAutoModelConfig(entry.traexAutoModel);
+    const traexAutoRequested = entryCliId === 'traex'
+      && requestedModel?.toLowerCase() === TRAEX_AUTO_MODEL_ID;
+    if (traexAutoRequested && (!normalizedTraexAutoModel.config || normalizedTraexAutoModel.error)) {
+      logger.warn(
+        `[bot-registry:${entry.larkAppId}] virtual auto model ignored: `
+        + `${normalizedTraexAutoModel.error ?? 'traexAutoModel is not enabled'}`,
+      );
+    }
+    const traexAutoModel = traexAutoRequested
+      ? normalizedTraexAutoModel.config
+      : undefined;
+    // Never forward the reserved virtual id to TraeX. An invalid hand edit
+    // fails closed to the CLI default while preserving the rest of the bot.
+    const model = traexAutoRequested
+      ? (traexAutoModel ? TRAEX_AUTO_MODEL_ID : undefined)
+      : requestedModel;
+
+    // Shared effort applies only where a model has no independent entry.
+    const sharedEffortModels = traexAutoModel
+      ? traexAutoModel.models.filter(id => !Object.prototype.hasOwnProperty.call(traexAutoModel.modelSettings ?? {}, id))
+      : [model];
 
     let voice: VoiceConfig | undefined;
     const rawVoice = entry.voice;
@@ -3986,9 +4034,8 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       launchShell: typeof entry.launchShell === 'string' && entry.launchShell.trim()
         ? entry.launchShell.trim()
         : undefined,
-      model: typeof entry.model === 'string' && entry.model.trim()
-        ? entry.model.trim()
-        : undefined,
+      model,
+      traexAutoModel,
       groupDefaultModels: normalizeGroupDefaultModels(entry.groupDefaultModels),
       groupSerialInput: normalizeGroupSerialInput(entry.groupSerialInput),
       groupIdleClose: normalizeGroupIdleClose(entry.groupIdleClose),
@@ -4005,11 +4052,8 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       dshProfile: entryCliId === 'dsh' ? normalizeDshProfile(entry.dshProfile) : undefined,
       reasoningEffort: isConfigurableReasoningCliId(entryCliId)
         && isCodexReasoningEffort(entry.reasoningEffort)
-        && cliModelSupportsReasoningEffort(
-          entryCliId,
-          typeof entry.model === 'string' ? entry.model : undefined,
-          entry.reasoningEffort,
-        )
+        && sharedEffortModels.every(candidate => (entryCliId === 'traex' && knownTraexReasoningEffortsForModel(candidate ?? '') === undefined)
+          || cliModelSupportsReasoningEffort(entryCliId, candidate, entry.reasoningEffort))
         ? entry.reasoningEffort : undefined,
       serviceTier: isCodexServiceTierCliId(entryCliId) && isCodexServiceTier(entry.serviceTier)
         ? entry.serviceTier
@@ -4027,7 +4071,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       // values all retain the historical inline behavior.
       envelopeInjection: entry.envelopeInjection === 'auto' ? 'auto' : undefined,
       codexBrowser,
-      codexRpcInput: entry.codexRpcInput === true,
+      codexRpcInput: typeof entry.codexRpcInput === 'boolean' ? entry.codexRpcInput : undefined,
       existingAppServer,
       // Missing keeps the historical every-cold-spawn global auth refresh.
       codexAuthSync: entry.codexAuthSync === 'isolated' ? 'isolated' : 'shared',
