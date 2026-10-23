@@ -46,6 +46,32 @@ export function supportsConfiguredCliRuntime(cliId: unknown): boolean {
   return cliId === 'codex' || cliId === 'kimi';
 }
 
+/**
+ * Remove a structured distribution descriptor from a mutable raw bots.json
+ * entry when its adapter contract no longer applies (an adapter switch, or an
+ * adapter that cannot carry a runtime). The equal `cliPathOverride` downgrade
+ * shadow is removed with it; a path override that differs from the runtime
+ * executable is a legacy/manual value and is intentionally preserved.
+ *
+ * Every writer that can change `cliId` must call this — setup/dashboard edits
+ * and the /config store alike — otherwise codex↔kimi leaves a descriptor that
+ * reloads legally but runs one family's binary under the other's contract.
+ */
+export function dropConfiguredCliRuntime(entry: {
+  cliRuntime?: unknown;
+  cliPathOverride?: unknown;
+}, shouldDrop: boolean): boolean {
+  if (!shouldDrop) return false;
+  const runtimeExecutable = entry.cliRuntime && typeof entry.cliRuntime === 'object'
+    ? (entry.cliRuntime as { executable?: unknown }).executable
+    : undefined;
+  delete entry.cliRuntime;
+  if (typeof runtimeExecutable === 'string' && entry.cliPathOverride === runtimeExecutable) {
+    delete entry.cliPathOverride;
+  }
+  return true;
+}
+
 export interface CliRuntimeIdentityInput {
   cliId?: string | null;
   cliRuntime?: Pick<CliRuntimeConfig, 'id'> | Pick<CliRuntimeSnapshot, 'id' | 'source'> | null;

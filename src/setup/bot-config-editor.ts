@@ -1,6 +1,7 @@
 import type { CliId } from '../adapters/cli/types.js';
 import { CLI_DISPLAY_NAMES } from '../adapters/cli/display-names.js';
 import {
+  dropConfiguredCliRuntime,
   normalizeCliRuntimeConfig,
   supportsConfiguredCliRuntime,
   type CliRuntimeConfig,
@@ -582,13 +583,10 @@ export function applyBotConfigEdits<T extends Record<string, any>>(
   // A distribution implements one adapter contract. Changing adapters must
   // clear the old descriptor even when both families support custom runtimes.
   const supportsRuntime = supportsConfiguredCliRuntime(out.cliId);
-  if (!supportsRuntime || (cliId && cliId !== previousCliId && !explicitlySettingRuntime)) {
+  const adapterChanged = !!cliId && cliId !== previousCliId;
+  if (!supportsRuntime || (adapterChanged && !explicitlySettingRuntime)) {
     if (explicitlySettingRuntime) throw new Error('cliRuntime is currently supported only for cliId "codex" or "kimi"');
-    const oldRuntimeExecutable = out.cliRuntime && typeof out.cliRuntime === 'object'
-      ? out.cliRuntime.executable
-      : undefined;
-    delete out.cliRuntime;
-    if (oldRuntimeExecutable && out.cliPathOverride === oldRuntimeExecutable) delete out.cliPathOverride;
+    dropConfiguredCliRuntime(out, true);
   }
 
   if (out.cliRuntime) {
