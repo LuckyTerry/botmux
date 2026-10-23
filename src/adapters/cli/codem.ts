@@ -26,11 +26,12 @@ export function createCodemAdapter(pathOverride?: string): CliAdapter {
     // The installer launcher invokes Node even when Botmux itself is a Bun binary.
     sandboxExtraExecPaths: () => [resolveCommandReal('node')],
 
-    buildArgs({ sessionId, resume, resumeSessionId, model, reasoningEffort, disableCliBypass }) {
+    buildArgs({ sessionId, resume, resumeSessionId, model, disableCliBypass }) {
       const args: string[] = [];
       if (!disableCliBypass) args.push('--yolo');
       if (model?.trim()) args.push('--model', model.trim());
-      if (reasoningEffort) args.push('--reasoning-effort', reasoningEffort);
+      // CodeM separates preset-model intelligence from provider-native effort;
+      // inherit its own settings instead of imposing Botmux's effort vocabulary.
       // --session creates once and subsequently reopens THIS topic's history.
       // Imported/native sessions use strict --resume; never select "latest".
       return resume && resumeSessionId

@@ -36,7 +36,9 @@ botmux setup edit cli_REPLACE_WITH_TARGET_APP_ID \
 ```
 
 This clears settings from a previous CLI/wrapper and inherits CodeM's own authenticated
-model configuration. An explicit Botmux model or reasoning effort is passed to CodeM.
+model configuration. An explicit Botmux model is passed to CodeM. Configure intelligence
+and reasoning effort in CodeM itself; this adapter inherits those settings rather than
+exposing Botmux's reasoning-effort selector.
 Apply the change by restarting only the target bot at an appropriate time:
 
 ```bash

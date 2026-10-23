@@ -73,11 +73,11 @@ describe('CodeM session ownership and launch arguments', () => {
     expect(adapter.resumeRequiresCliSessionId).not.toBe(true);
   });
 
-  it('resumes an imported native id exactly and forwards explicit model/effort', () => {
+  it('resumes an imported native id and forwards model while inheriting native effort settings', () => {
     expect(adapter.buildArgs({
       sessionId: 'topic-A', resume: true, resumeSessionId: 'native-session',
       model: '  custom-model  ', reasoningEffort: 'high', disableCliBypass: true,
-    })).toEqual(['--model', 'custom-model', '--reasoning-effort', 'high', '--resume', 'native-session']);
+    })).toEqual(['--model', 'custom-model', '--resume', 'native-session']);
     expect(adapter.modelChoices).toBeUndefined();
     expect(adapter.authPaths).toContain('~/.codem');
     expect(adapter.authPaths).not.toContain('~/.kimi-code/credentials');
