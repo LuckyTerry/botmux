@@ -3,6 +3,10 @@
 Select **CodeM** in `botmux setup` or the Dashboard CLI picker, or use `cliId: "codem"`.
 The adapter launches CodeM directly; no `codem-wrapper` npm package or Kimi installation is required.
 
+The shared Dashboard CLI control with this branch's registered options (isolated component preview):
+
+![CodeM in the Dashboard CLI picker](images/codem-cli-picker.png)
+
 ## Prerequisites
 
 Install CodeM with its official installer and sign in as the OS account running Botmux:
